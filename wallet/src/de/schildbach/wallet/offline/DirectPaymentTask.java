@@ -22,7 +22,6 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.math.BigInteger;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
@@ -40,12 +39,6 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.os.Handler;
 import android.os.Looper;
-
-import com.google.bitcoin.core.Address;
-import com.google.bitcoin.core.Transaction;
-import com.google.bitcoin.script.ScriptBuilder;
-import com.google.protobuf.ByteString;
-
 import de.schildbach.wallet.Constants;
 import de.schildbach.wallet.PaymentIntent;
 import de.schildbach.wallet.util.Bluetooth;
@@ -92,8 +85,7 @@ public abstract class DirectPaymentTask
 		}
 
 		@Override
-		public void send(@Nonnull final PaymentIntent.Standard standard, @Nonnull final Transaction transaction,
-				@Nonnull final Address refundAddress, @Nonnull final BigInteger refundAmount, @Nonnull final byte[] merchantData)
+		public void send(@Nonnull final PaymentIntent.Standard standard, @Nonnull final Payment payment)
 		{
 			super.backgroundHandler.post(new Runnable()
 			{
@@ -103,7 +95,7 @@ public abstract class DirectPaymentTask
 					if (standard != PaymentIntent.Standard.BIP70)
 						throw new IllegalArgumentException("cannot handle: " + standard);
 
-					log.info("trying to send tx {} to {}", new Object[] { transaction.getHashAsString(), url });
+					log.info("trying to send tx to {}", url);
 
 					HttpURLConnection connection = null;
 					OutputStream os = null;
@@ -111,8 +103,6 @@ public abstract class DirectPaymentTask
 
 					try
 					{
-						final Payment payment = createPaymentMessage(transaction, refundAddress, refundAmount, null, merchantData);
-
 						connection = (HttpURLConnection) new URL(url).openConnection();
 
 						connection.setConnectTimeout(Constants.HTTP_TIMEOUT_MS);
@@ -133,7 +123,7 @@ public abstract class DirectPaymentTask
 						payment.writeTo(os);
 						os.flush();
 
-						log.info("tx {} sent via http", transaction.getHashAsString());
+						log.info("tx sent via http");
 
 						final int responseCode = connection.getResponseCode();
 						if (responseCode == HttpURLConnection.HTTP_OK)
@@ -212,18 +202,19 @@ public abstract class DirectPaymentTask
 		}
 
 		@Override
-		public void send(@Nonnull final PaymentIntent.Standard standard, @Nonnull final Transaction transaction,
-				@Nonnull final Address refundAddress, @Nonnull final BigInteger refundAmount, @Nonnull final byte[] merchantData)
+		public void send(@Nonnull final PaymentIntent.Standard standard, @Nonnull final Payment payment)
 		{
 			super.backgroundHandler.post(new Runnable()
 			{
 				@Override
 				public void run()
 				{
-					log.info("trying to send tx {} via bluetooth {} using {} standard", new Object[] { transaction.getHashAsString(), bluetoothMac,
-							standard });
+					log.info("trying to send tx via bluetooth {} using {} standard", bluetoothMac, standard);
 
-					final byte[] serializedTx = transaction.unsafeBitcoinSerialize();
+					if (payment.getTransactionsCount() != 1)
+						throw new IllegalArgumentException("wrong transactions count");
+
+					final byte[] serializedTx = payment.getTransactions(0).toByteArray();
 
 					BluetoothSocket socket = null;
 					DataOutputStream os = null;
@@ -251,7 +242,7 @@ public abstract class DirectPaymentTask
 
 							os.flush();
 
-							log.info("tx {} sent via bluetooth", transaction.getHashAsString());
+							log.info("tx sent via bluetooth");
 
 							ack = is.readBoolean();
 						}
@@ -265,11 +256,10 @@ public abstract class DirectPaymentTask
 							is = new DataInputStream(socket.getInputStream());
 							os = new DataOutputStream(socket.getOutputStream());
 
-							final Payment payment = createPaymentMessage(transaction, refundAddress, refundAmount, null, merchantData);
 							payment.writeDelimitedTo(os);
 							os.flush();
 
-							log.info("tx {} sent via bluetooth", transaction.getHashAsString());
+							log.info("tx sent via bluetooth");
 
 							final Protos.PaymentACK paymentAck = Protos.PaymentACK.parseDelimitedFrom(is);
 
@@ -333,8 +323,7 @@ public abstract class DirectPaymentTask
 		}
 	}
 
-	public abstract void send(@Nonnull PaymentIntent.Standard standard, @Nonnull Transaction transaction, @Nonnull Address refundAddress,
-			@Nonnull BigInteger refundAmount, @Nonnull byte[] merchantData);
+	public abstract void send(@Nonnull PaymentIntent.Standard standard, @Nonnull Payment payment);
 
 	protected void onResult(final boolean ack)
 	{
@@ -358,33 +347,6 @@ public abstract class DirectPaymentTask
 				resultCallback.onFail(messageResId, messageArgs);
 			}
 		});
-	}
-
-	private static Payment createPaymentMessage(@Nonnull final Transaction transaction, @Nullable final Address refundAddress,
-			@Nullable final BigInteger refundAmount, @Nullable final String memo, @Nullable final byte[] merchantData) throws IOException
-	{
-		final Protos.Payment.Builder builder = Protos.Payment.newBuilder();
-
-		builder.addTransactions(ByteString.copyFrom(transaction.unsafeBitcoinSerialize()));
-
-		if (refundAddress != null)
-		{
-			if (refundAmount.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0)
-				throw new IllegalArgumentException("refund amount too big for protobuf: " + refundAmount);
-
-			final Protos.Output.Builder refundOutput = Protos.Output.newBuilder();
-			refundOutput.setAmount(refundAmount.longValue());
-			refundOutput.setScript(ByteString.copyFrom(ScriptBuilder.createOutputScript(refundAddress).getProgram()));
-			builder.addRefundTo(refundOutput);
-		}
-
-		if (memo != null)
-			builder.setMemo(memo);
-
-		if (merchantData != null)
-			builder.setMerchantData(ByteString.copyFrom(merchantData));
-
-		return builder.build();
 	}
 
 	private static String parsePaymentAck(@Nonnull final Protos.PaymentACK paymentAck, @Nonnull final Payment expectedPaymentMessage)
